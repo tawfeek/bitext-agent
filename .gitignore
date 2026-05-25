@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+data/*.parquet
+data/*.csv
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
