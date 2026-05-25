@@ -9,12 +9,27 @@ from src.cli import run_repl
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Customer Service Data Analyst Agent (Task 1)."
+        description=(
+            "Customer Service Data Analyst Agent — LangGraph ReAct agent "
+            "for the Bitext dataset, with persistent conversation + user "
+            "profile memory."
+        )
     )
     parser.add_argument(
         "--session",
         default="default",
-        help="Session ID (used by Task 2 persistence; ignored in Task 1).",
+        help=(
+            "Session ID. The same value on a future run resumes the same "
+            "conversation thread (via SqliteSaver checkpointer)."
+        ),
+    )
+    parser.add_argument(
+        "--user",
+        default=None,
+        help=(
+            "User ID for the persistent per-user profile. "
+            "Defaults to --session if omitted."
+        ),
     )
     parser.add_argument(
         "--quiet",
@@ -26,7 +41,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    run_repl(session_id=args.session, verbose=not args.quiet)
+    run_repl(
+        session_id=args.session,
+        user_id=args.user,
+        verbose=not args.quiet,
+    )
 
 
 if __name__ == "__main__":

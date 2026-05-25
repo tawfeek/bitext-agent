@@ -9,7 +9,11 @@ it once and you should be able to navigate any node in the graph.
 ## 1. Bird's-eye view
 
 The agent is a **LangGraph state machine**. One question from the user
-flows through the graph once and produces one final answer.
+flows through the graph once and produces one final answer. The graph
+is wrapped in a `SqliteSaver` checkpointer (Task 2a) so the message
+history is restored on the next process run for the same `thread_id`.
+After every final answer, an `update_profile` node refreshes a
+per-user markdown profile (Task 2b).
 
 ```mermaid
 flowchart LR
@@ -18,8 +22,9 @@ flowchart LR
     R -- structured / unstructured --> A[agent]
     A -- tool_calls present --> T[tools]
     T --> A
-    A -- no tool_calls --> END([END])
+    A -- no tool_calls --> UP[update_profile]
     A -- iter ≥ max --> M[max_iterations]
+    UP --> END([END])
     D --> END
     M --> END
 ```
@@ -42,14 +47,15 @@ Plain-text version (for terminals):
         │          └────┬─────────────┬───┘    │
         │   no calls    │             │ calls  │
         ▼               ▼             ▼        │
-       END             END        ┌─────┐      │
-                                  │tools│──────┘
-                                  └─────┘
-                      iter ≥ max
-                          │
-                          ▼
+       END   ┌──────────────────┐ ┌─────┐      │
+             │  update_profile  │ │tools│──────┘
+             └────────┬─────────┘ └─────┘
+                      ▼
+                     END
+                      ▲
+                      │ iter ≥ max
                 ┌──────────────────┐
-                │  max_iterations  │ → END
+                │  max_iterations  │
                 └──────────────────┘
 ```
 
@@ -75,15 +81,21 @@ class AgentState(TypedDict):
     classification: Optional[str]   # "structured" | "unstructured" | "out_of_scope"
     route_reason: Optional[str]     # one-line justification, for logging
     iterations: int                 # ReAct loop counter
+    user_id: Optional[str]          # selects the per-user profile file
 ```
 
 - `messages` is the canonical LangGraph message channel. The reducer
   `add_messages` *appends* new messages rather than replacing the list,
-  so every node can return just its delta.
+  so every node can return just its delta. With the checkpointer
+  enabled, this list is also persisted to disk between runs.
 - `iterations` is incremented on each `agent` step. It is the basis for
-  the max-iterations fallback (see §6).
+  the max-iterations fallback (see §6). The router resets it to 0 at
+  the start of every new question so the counter is per-turn, not
+  per-session.
 - `classification` is set once by the router and read by the conditional
   edge that follows it.
+- `user_id` selects which markdown profile file the agent reads on each
+  turn and the `update_profile` node writes back to.
 
 ---
 
@@ -121,14 +133,18 @@ Returns a fixed polite refusal message. No LLM call. Lives in
 
 The "think" half of the ReAct loop. It:
 
-1. Prepends a `SystemMessage` with the analyst-role prompt (only on the
-   first turn — the reducer prevents duplicates afterwards).
-2. Calls the Nebius model (Qwen3-235B) that has been `bind_tools(...)`ed
+1. Loads the current user's profile from disk and renders a fresh
+   `SystemMessage` containing the analyst-role prompt + profile.
+2. Strips any old `SystemMessage` from the persisted history (the
+   profile may have changed since the previous turn) and prepends the
+   freshly rendered one for the model call only.
+3. Calls the Nebius model (Qwen3-235B) that has been `bind_tools(...)`ed
    to the 6 dataset tools.
-3. Returns the new `AIMessage` plus `iterations += 1`.
+4. Returns the new `AIMessage` plus `iterations += 1`.
 
 The model is built **once** at graph-compile time, so we don't pay the
-construction cost on every turn.
+construction cost on every turn. Only the small profile string is
+re-read each turn.
 
 ### 3.4 `tools` — `langgraph.prebuilt.ToolNode`
 
@@ -144,6 +160,27 @@ without the model producing a final answer. Emits a graceful "I
 couldn't reach an answer in N steps, please rephrase" message. No LLM
 call.
 
+### 3.6 `update_profile` — [src/agent.py:_make_update_profile_node](src/agent.py)
+
+Runs **after** the agent emits a final answer (i.e. an `AIMessage`
+with no `tool_calls`). It does *not* modify `messages` — it just
+refreshes the markdown profile on disk via a single LLM call:
+
+1. Find the latest `HumanMessage` and the latest tool-less
+   `AIMessage` in state.
+2. Load the current profile from `data/profiles/<user>.md`.
+3. Call the updater chain
+   ([src/profile.py:build_profile_updater](src/profile.py)) which is
+   prompted to **return the profile unchanged** when nothing new
+   emerged, or to fold in any new durable fact when it did.
+4. Compare strings; if changed, write back to disk.
+
+Failures here are caught and swallowed: an updater hiccup must never
+break the user-facing answer.
+
+The `decline` and `max_iterations` paths deliberately skip this node:
+neither produces durable user information worth recording.
+
 ---
 
 ## 4. The edges
@@ -155,6 +192,7 @@ LangGraph edges fall into two kinds:
 - `tools → agent`   *(after running tools, always think again)*
 - `decline → END`
 - `max_iterations → END`
+- `update_profile → END`
 
 **Conditional** (a Python function picks the next node):
 
@@ -167,7 +205,7 @@ def _route_after_router(state):
 def _route_after_agent(state):
     last = state["messages"][-1]
     if not last.tool_calls:
-        return END                          # model is done
+        return "update_profile"             # final answer, refresh profile then END
     if state["iterations"] >= MAX_ITER:
         return "max_iterations"             # bail out
     return "tools"                          # keep going
@@ -225,6 +263,69 @@ AGENT_MAX_ITERATIONS = 12   # tunable via .env
   thinking step, not mid-tool-call.
 - When the cap is hit, the graph routes to `max_iterations`, which
   emits a final `AIMessage` and the CLI prints it like any other answer.
+
+---
+
+## 6.5 Memory (Task 2)
+
+Two independent stores, two different lifecycles.
+
+### Episodic — `data/checkpoints.sqlite` (per session)
+
+The CLI opens a `SqliteSaver` once per process and passes it to
+`build_graph(checkpointer=...)`. On every `graph.stream(...)` call we
+pass:
+
+```python
+config = {"configurable": {"thread_id": session_id}}
+```
+
+The checkpointer writes one row to SQLite per node transition. On a
+fresh process for the same `thread_id`, `graph.get_state(config)`
+returns the full prior state — `messages` chief among them — and the
+next `stream` call appends to it. This is what makes follow-ups like
+`"show me 3 more"` work across restarts: the LLM sees the previous
+`get_examples(category="REFUND", n=3)` turn in its context.
+
+### Semantic — `data/profiles/<user>.md` (per user)
+
+A short markdown file:
+
+```markdown
+# User Profile
+**Name:** Adam
+**Interests:** refunds, account management
+**Preferences:** concise answers
+**Notes:** Repeat questioner about REFUND category.
+```
+
+Two integration points:
+
+1. **Read** — the agent node loads the current file and inlines it
+   into its system prompt. So when the user asks *"what do you
+   remember about me?"* the agent reads its own system message and
+   answers, no tool calls needed.
+2. **Write** — the `update_profile` node, after each final answer,
+   asks an LLM to fold any new durable fact into the file (or return
+   it unchanged). Strict prompting prevents replay of one-off question
+   contents.
+
+User IDs are sanitized through a strict regex
+(`[^A-Za-z0-9._-] → _`) before being used as filenames, so a weird
+`--user` value can't escape the `profiles/` directory.
+
+### Why two stores instead of one?
+
+The two memories have different shapes and different decay properties:
+
+- The conversation is **append-only** and verbatim — perfect for the
+  LangGraph reducer + SQLite.
+- The profile is **rewritten in place** with a 200-word cap — perfect
+  for a small markdown file the LLM can read directly.
+
+Cramming the profile into the message stream would inflate every
+turn's prompt; cramming the messages into the profile would lose the
+sequencing that follow-up resolution depends on.
 
 ---
 
@@ -315,13 +416,9 @@ agent › I wasn't able to reach a confident answer within 12 reasoning
 These pieces belong to later tasks and are out of scope for this
 document:
 
-- **Persistent conversation memory (Task 2a).** `build_graph()` already
-  accepts a `checkpointer` argument; we'll wire `SqliteSaver` to it.
-- **Per-user profile (Task 2b).** Will be a separate summary node that
-  reads/writes a `context.md` (or store) keyed by user.
 - **MCP server (Task 3).** Will wrap the same tool implementations in
-  `src/tools.py` with FastMCP — the tool logic doesn't change, only the
-  transport.
+  `src/tools.py` with FastMCP — the tool logic doesn't change, only
+  the transport.
 - **Streamlit UI (Bonus A) / query recommender (Bonus B).**
 
 The graph and state are deliberately shaped so each of these is an

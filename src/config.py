@@ -25,9 +25,13 @@ class Settings:
     max_iterations: int
     dataset_cache_path: Path
     hf_dataset_id: str
+    checkpoint_db_path: Path
+    profiles_dir: Path
 
     @classmethod
     def load(cls) -> "Settings":
+        profiles_dir = DATA_DIR / "profiles"
+        profiles_dir.mkdir(exist_ok=True)
         return cls(
             nebius_api_key=os.environ.get("NEBIUS_API_KEY", ""),
             nebius_base_url=os.environ.get(
@@ -37,6 +41,8 @@ class Settings:
             max_iterations=int(os.environ.get("AGENT_MAX_ITERATIONS", "12")),
             dataset_cache_path=DATA_DIR / "bitext.parquet",
             hf_dataset_id="bitext/Bitext-customer-support-llm-chatbot-training-dataset",
+            checkpoint_db_path=DATA_DIR / "checkpoints.sqlite",
+            profiles_dir=profiles_dir,
         )
 
 

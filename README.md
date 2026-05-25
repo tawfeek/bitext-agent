@@ -8,7 +8,17 @@ It handles three kinds of questions:
 - **Unstructured** — open-ended summarization (`"Summarize the FEEDBACK category"`).
 - **Out-of-scope** — unrelated to the dataset, politely declined.
 
-This README covers **Task 1** of the assignment.
+It has two kinds of persistent memory (Task 2):
+
+- **Episodic** — per-session conversation history via a `SqliteSaver`
+  checkpointer (`--session <id>` resumes prior conversations across
+  restarts).
+- **Semantic** — a per-user markdown profile of distilled facts
+  (name, recurring interests, preferences) maintained in
+  `data/profiles/<user>.md` and answered from the agent's prompt
+  directly. Pass `--user <id>` to scope the profile.
+
+This README covers **Tasks 1 and 2**.
 
 ---
 
@@ -53,9 +63,24 @@ fully offline for the dataset.
 Useful flags:
 
 ```bash
-python main.py --quiet            # hide per-step reasoning
-python main.py --session my_sess  # session id (used by Task 2)
+python main.py                                # default session + user = "default"
+python main.py --session refunds              # named session, resumes on next run
+python main.py --session refunds --user adam  # session bound to a named user profile
+python main.py --quiet                        # hide per-step reasoning
 ```
+
+In-REPL commands: `:profile` prints the current user's stored profile,
+`:reset` starts a fresh session (old one stays on disk), `exit` quits.
+
+State on disk:
+
+| Path | Contents |
+|---|---|
+| `data/checkpoints.sqlite` | LangGraph checkpoints (one row per turn per session). |
+| `data/profiles/<user>.md` | Per-user distilled profile. |
+| `data/bitext.parquet` | Cached dataset (rebuilt on first run). |
+
+All of these are under `data/` and gitignored.
 
 ---
 
@@ -103,19 +128,30 @@ Try also:
               └───┬────┘                  └────────┘
        no calls   │   iter ≥ max
                   ▼                       ┌──────────────────┐
-                 END                ─────▶│ max_iterations   │──▶ END
-                                          └──────────────────┘
+        ┌──────────────────┐         ───▶ │ max_iterations   │──▶ END
+        │  update_profile  │              └──────────────────┘
+        └────────┬─────────┘
+                 ▼
+                END
 ```
+
+A `SqliteSaver` checkpointer wraps the whole graph so `messages` and
+`user_id` survive process restarts under a given `thread_id` (i.e.
+`--session`). The `update_profile` node persists distilled facts about
+the user separately, in `data/profiles/<user>.md`.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for a node-by-node walkthrough.
 
 Key files:
 
 | File | Role |
 |---|---|
 | [main.py](main.py) | CLI entry point with `argparse` |
-| [src/cli.py](src/cli.py) | Streams graph updates and prints reasoning |
-| [src/agent.py](src/agent.py) | LangGraph wiring + max-iterations fallback |
+| [src/cli.py](src/cli.py) | Streams graph updates and prints reasoning; opens SqliteSaver |
+| [src/agent.py](src/agent.py) | LangGraph wiring + max-iterations fallback + profile injection |
 | [src/router.py](src/router.py) | Structured-output router (Pydantic) |
 | [src/tools.py](src/tools.py) | Tools with descriptions + Pydantic schemas |
+| [src/profile.py](src/profile.py) | Per-user profile load/save + LLM updater |
 | [src/dataset.py](src/dataset.py) | HuggingFace loader with parquet cache |
 | [src/llm.py](src/llm.py) | Nebius Token Factory chat-model factory |
 | [src/config.py](src/config.py) | Env-var configuration |
@@ -178,6 +214,48 @@ summarization by the LLM.
 
 ---
 
+## Memory (Task 2)
+
+### Episodic — conversation across turns and restarts
+
+Persistence is provided by
+`langgraph.checkpoint.sqlite.SqliteSaver` against
+`data/checkpoints.sqlite`. The CLI opens it once per process and passes
+`config={"configurable": {"thread_id": <session_id>}}` on every
+`stream` call, so the messages list is restored automatically.
+
+Demo:
+
+```bash
+$ python main.py --session demo --user adam
+agent › ...
+you › Show me 3 examples from REFUND
+you › exit
+
+$ python main.py --session demo --user adam     # different process
+(resumed: 4 prior messages in this session)
+you › Show me 3 more
+```
+
+The "3 more" is resolved against the prior turn that lives in the
+checkpoint — the LLM sees the full message history when it picks tool
+arguments.
+
+### Semantic — per-user profile
+
+A small markdown file lives at `data/profiles/<user>.md`. It holds
+distilled facts only (name, interests, preferences, notes) — never a
+transcript replay. After every final agent answer, the
+`update_profile` node calls an LLM that either rewrites the profile or
+returns it unchanged.
+
+The profile is injected into the agent's **system prompt** on every
+turn, so questions like *"What do you remember about me?"* are
+answered directly without tool calls.
+
+Inspect the current profile from inside the REPL with `:profile`, or
+just open the markdown file.
+
 ## Project layout
 
 ```
@@ -185,13 +263,17 @@ summarization by the LLM.
 ├── main.py
 ├── requirements.txt
 ├── .env.example
-├── data/                # cached parquet (gitignored)
+├── data/                       # all runtime state, gitignored
+│   ├── bitext.parquet          # cached dataset
+│   ├── checkpoints.sqlite      # episodic memory (Task 2a)
+│   └── profiles/<user>.md      # semantic memory (Task 2b)
 └── src/
     ├── agent.py
     ├── cli.py
     ├── config.py
     ├── dataset.py
     ├── llm.py
+    ├── profile.py
     ├── router.py
     └── tools.py
 ```

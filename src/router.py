@@ -65,6 +65,18 @@ Classify the user's question into exactly one of three buckets:
 
 Be strict about out_of_scope: if answering would require knowledge that is
 NOT in the customer-service dataset, classify it as out_of_scope.
+
+ALSO IN-SCOPE (classify as "structured"): meta-questions about the
+conversation itself or what the agent remembers about the user. These
+are answerable from the agent's stored profile and conversation history.
+Examples:
+  * "What do you remember about me?"
+  * "What have we talked about?"
+  * "What do I usually ask about?"
+
+Follow-up references to earlier turns (e.g. "show me 3 more", "what
+about refunds?", "total of the last two") should be classified the same
+way the prior question was -- usually "structured".
 """
 
 

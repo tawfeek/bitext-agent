@@ -6,6 +6,9 @@ venv/
 .DS_Store
 data/*.parquet
 data/*.csv
+data/*.sqlite
+data/*.sqlite-journal
+data/profiles/
 .ipynb_checkpoints/
 .mypy_cache/
 .ruff_cache/

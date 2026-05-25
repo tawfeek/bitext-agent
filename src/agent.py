@@ -1,15 +1,20 @@
 """LangGraph wiring for the data analyst agent.
 
-Graph shape:
+Graph shape (Task 2):
 
     START -> router -> { out_of_scope: decline -> END
                        | structured / unstructured: agent <-> tools (loop)
-                                                    agent -> END (no tool calls or max iters)
+                                                    agent -> update_profile -> END
                        }
+    agent -> max_iterations -> END   (iteration cap)
 
-We build the ReAct loop manually (rather than using ``create_react_agent``)
-so we have first-class access to iteration counts (for the max-iterations
-fallback) and to the routing classification.
+Episodic memory (Task 2a): a checkpointer (SqliteSaver in production)
+persists ``messages`` per ``thread_id``. The same ``--session`` ID
+restores the same conversation across restarts.
+
+Semantic memory (Task 2b): a per-user markdown profile is loaded into
+the agent's system prompt every turn, and an ``update_profile`` node
+refreshes it after each final answer.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from langgraph.prebuilt import ToolNode
 
 from .config import SETTINGS
 from .llm import build_chat_model
+from .profile import build_profile_updater, load_profile, save_profile
 from .router import RouteDecision, build_router
 from .tools import ALL_TOOLS
 
@@ -40,10 +46,11 @@ class AgentState(TypedDict):
     classification: Optional[str]
     route_reason: Optional[str]
     iterations: int
+    user_id: Optional[str]
 
 
-_AGENT_SYSTEM_PROMPT = """You are a data analyst for the Bitext Customer
-Service Tagged Training Dataset.
+_AGENT_SYSTEM_TEMPLATE = """You are a data analyst for the Bitext
+Customer Service Tagged Training Dataset.
 
 Available columns: category, intent, instruction (customer message),
 response (agent reply).
@@ -60,15 +67,36 @@ Guidelines:
   about late delivery"), use search_examples on the customer instruction.
 - For "summarize ..." or "how do agents respond ..." questions, call
   get_examples with a larger n (e.g. 15-20) on the relevant filter, then
-  write a concise summary of the *responses* (or *instructions*, depending
-  on the question) drawing on those rows. Do not invent details that are
-  not present in the rows you fetched.
-- Never answer questions that are not about this dataset from general
+  write a concise summary of the *responses* (or *instructions*,
+  depending on the question) drawing on those rows. Do not invent
+  details that are not present in the rows you fetched.
+- For follow-up questions referring to earlier turns ("show me 3 more",
+  "what about refunds?", "total of the last two"), use the conversation
+  history above to resolve what the user means before choosing a tool.
+- Never answer questions that are NOT about this dataset from general
   knowledge.
 
-When you have enough information, produce a final answer message with no
-tool calls.
+WHAT YOU REMEMBER ABOUT THE CURRENT USER (their persistent profile):
+---
+{profile}
+---
+
+If the user asks a meta-question about themselves ("what do you
+remember about me?", "what do I usually ask about?"), answer directly
+from the profile above WITHOUT calling tools.
+
+When you have enough information, produce a final answer message with
+no tool calls.
 """
+
+
+def _build_system_prompt(user_id: str | None) -> str:
+    profile_md = load_profile(user_id or "default")
+    return _AGENT_SYSTEM_TEMPLATE.format(profile=profile_md.strip())
+
+
+def _strip_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    return [m for m in messages if not isinstance(m, SystemMessage)]
 
 
 def _make_router_node():
@@ -106,11 +134,9 @@ def _make_agent_node():
     model = build_chat_model(temperature=0.0).bind_tools(ALL_TOOLS)
 
     def agent_node(state: AgentState) -> dict:
-        # Inject the system prompt only on the first agent turn.
-        messages = state["messages"]
-        if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=_AGENT_SYSTEM_PROMPT), *messages]
-        response = model.invoke(messages)
+        system = SystemMessage(content=_build_system_prompt(state.get("user_id")))
+        non_system = _strip_system_messages(state["messages"])
+        response = model.invoke([system, *non_system])
         return {
             "messages": [response],
             "iterations": state.get("iterations", 0) + 1,
@@ -129,6 +155,48 @@ def _max_iterations_node(state: AgentState) -> dict:
     return {"messages": [AIMessage(content=msg)]}
 
 
+def _make_update_profile_node():
+    updater = build_profile_updater()
+
+    def update_profile_node(state: AgentState) -> dict:
+        user_id = state.get("user_id") or "default"
+        messages = state["messages"]
+        last_human = next(
+            (m for m in reversed(messages) if isinstance(m, HumanMessage)),
+            None,
+        )
+        last_ai = next(
+            (
+                m
+                for m in reversed(messages)
+                if isinstance(m, AIMessage) and not m.tool_calls and m.content
+            ),
+            None,
+        )
+        if last_human is None or last_ai is None:
+            return {}
+
+        current = load_profile(user_id)
+        try:
+            updated = updater.invoke(
+                {
+                    "current_profile": current,
+                    "user_message": last_human.content,
+                    "agent_response": last_ai.content,
+                }
+            )
+            new_md = updated.content if hasattr(updated, "content") else str(updated)
+            if new_md.strip() and new_md.strip() != current.strip():
+                save_profile(user_id, new_md)
+        except Exception:
+            # Profile update is best-effort; never break the user-facing
+            # answer because the updater hiccuped.
+            pass
+        return {}
+
+    return update_profile_node
+
+
 def _route_after_router(
     state: AgentState,
 ) -> Literal["agent", "decline"]:
@@ -137,13 +205,13 @@ def _route_after_router(
 
 def _route_after_agent(
     state: AgentState,
-) -> Literal["tools", "max_iterations", "__end__"]:
+) -> Literal["tools", "max_iterations", "update_profile"]:
     last = state["messages"][-1]
     has_tool_calls = (
         isinstance(last, AIMessage) and bool(getattr(last, "tool_calls", []))
     )
     if not has_tool_calls:
-        return END
+        return "update_profile"
     if state.get("iterations", 0) >= SETTINGS.max_iterations:
         return "max_iterations"
     return "tools"
@@ -153,8 +221,9 @@ def build_graph(checkpointer=None):
     """Compile and return the agent graph.
 
     Args:
-        checkpointer: Optional LangGraph checkpointer for persistence
-            (used in Task 2). Pass ``None`` for a stateless run.
+        checkpointer: Optional LangGraph checkpointer for episodic memory.
+            Pass a ``SqliteSaver`` instance to persist conversations across
+            restarts; pass ``None`` for a stateless run.
     """
     builder: StateGraph = StateGraph(AgentState)
     builder.add_node("router", _make_router_node())
@@ -162,6 +231,7 @@ def build_graph(checkpointer=None):
     builder.add_node("agent", _make_agent_node())
     builder.add_node("tools", ToolNode(ALL_TOOLS))
     builder.add_node("max_iterations", _max_iterations_node)
+    builder.add_node("update_profile", _make_update_profile_node())
 
     builder.add_edge(START, "router")
     builder.add_conditional_edges(
@@ -173,10 +243,15 @@ def build_graph(checkpointer=None):
     builder.add_conditional_edges(
         "agent",
         _route_after_agent,
-        {"tools": "tools", "max_iterations": "max_iterations", END: END},
+        {
+            "tools": "tools",
+            "max_iterations": "max_iterations",
+            "update_profile": "update_profile",
+        },
     )
     builder.add_edge("tools", "agent")
     builder.add_edge("max_iterations", END)
+    builder.add_edge("update_profile", END)
 
     return builder.compile(checkpointer=checkpointer)
 
