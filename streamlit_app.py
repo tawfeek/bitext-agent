@@ -194,6 +194,18 @@ def sidebar(checkpointer: SqliteSaver) -> tuple[str, str]:
         st.session_state.session_id = f"session-{int(time.time())}"
         st.rerun()
 
+    if st.sidebar.button(
+        "💡 Suggest a query",
+        use_container_width=True,
+        help=(
+            "Ask the agent to recommend a follow-up query based on this "
+            "session's history and your profile. The agent will propose "
+            "one and wait for your confirmation before running it."
+        ),
+    ):
+        st.session_state.pending_input = "What should I query next?"
+        st.rerun()
+
     with st.sidebar.expander("👤 User profile", expanded=False):
         st.code(load_profile(st.session_state.user_id), language="markdown")
 
@@ -297,9 +309,13 @@ def main() -> None:
         prior_messages = []
     render_history(prior_messages)
 
+    # Pick up either the chat input or a pre-filled query (e.g. from
+    # the "💡 Suggest a query" sidebar button).
     user_text = st.chat_input("Ask about the Bitext dataset…")
-    if user_text:
-        stream_turn(graph, user_text.strip(), session_id, user_id)
+    pending = st.session_state.pop("pending_input", None)
+    chosen = user_text or pending
+    if chosen:
+        stream_turn(graph, chosen.strip(), session_id, user_id)
 
 
 if __name__ == "__main__":

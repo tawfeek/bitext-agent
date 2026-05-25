@@ -74,6 +74,19 @@ Examples:
   * "What have we talked about?"
   * "What do I usually ask about?"
 
+ALSO IN-SCOPE (classify as "structured"): requests for a query
+recommendation, OR explicit confirmations/refinements of a pending
+suggestion. The agent handles these via a suggest-then-confirm protocol
+in its own prompt; the router just needs to NOT mark them out_of_scope.
+Examples:
+  * "What should I query next?"
+  * "Recommend something to ask."
+  * "What would be interesting to look at?"
+  * "Yes, do it." / "Run it." / "Go ahead." (confirmation of a prior
+    agent suggestion)
+  * "I'd rather see examples instead." (refinement of a prior agent
+    suggestion)
+
 Follow-up references to earlier turns (e.g. "show me 3 more", "what
 about refunds?", "total of the last two") should be classified the same
 way the prior question was -- usually "structured".

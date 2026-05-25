@@ -26,7 +26,12 @@ without going through the agent.
 A **Streamlit chat UI** (Bonus A) wraps the same agent in a browser, with
 collapsible reasoning steps and a session switcher in the sidebar.
 
-This README covers **Tasks 1, 2, 3 + Bonus A**.
+The agent also supports an interactive **query recommender** (Bonus B):
+ask *"What should I query next?"* and it proposes a follow-up based on
+your session history and profile, lets you refine it, and only executes
+once you confirm.
+
+This README covers **Tasks 1, 2, 3 + Bonus A + Bonus B**.
 
 ---
 
@@ -376,6 +381,49 @@ Main pane:
 - A `st.chat_input` at the bottom; while a turn is in flight, a live
   status panel shows the router decision, tool calls, and observations
   as they arrive from `graph.stream(...)`.
+
+## Query recommender (Bonus B)
+
+The agent supports a suggest-then-confirm protocol for query
+recommendations. It activates whenever the user asks for a suggestion
+in plain English:
+
+- *"What should I query next?"*
+- *"Recommend something to ask."*
+- *"What would be interesting to look at?"*
+
+When triggered:
+
+1. The agent looks at the conversation history (episodic memory) and
+   your profile (semantic memory).
+2. It **proposes one specific query in plain text** and asks for
+   confirmation. Crucially, it does **not** call any tools yet.
+3. You can refine the suggestion conversationally
+   (*"I'd rather see examples instead"*, *"make it 10 not 5"*).
+4. Only when you explicitly confirm
+   (*"yes"*, *"do it"*, *"go ahead"*) does the agent call the relevant
+   tool and return the results.
+
+Example transcript:
+
+```
+you › What should I query next?
+agent › Based on your interest in refund data, you might want to see
+        the distribution of intents in the REFUND category. Should I
+        go ahead?
+
+you › I'd rather see examples instead.
+agent › Then I'd suggest: show 5 examples from the REFUND category.
+        Want me to run this?
+
+you › Yes, do it.
+[agent → tool] get_examples({"category": "REFUND", "n": 5})
+agent › Here are 5 REFUND examples: ...
+```
+
+The Streamlit UI has a **💡 Suggest a query** sidebar button that
+sends the trigger phrase for you, so users can discover the feature
+without knowing the exact wording.
 
 ## Project layout
 
