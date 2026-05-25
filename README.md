@@ -23,7 +23,10 @@ FastMCP server (Task 3) so any MCP-compatible client (Claude Desktop,
 the MCP Inspector, a script using `fastmcp.Client`) can call them
 without going through the agent.
 
-This README covers **Tasks 1, 2, and 3**.
+A **Streamlit chat UI** (Bonus A) wraps the same agent in a browser, with
+collapsible reasoning steps and a session switcher in the sidebar.
+
+This README covers **Tasks 1, 2, 3 + Bonus A**.
 
 ---
 
@@ -340,11 +343,46 @@ To wire the server into Claude Desktop, add this to your
 }
 ```
 
+## Streamlit UI (Bonus A)
+
+A browser-based chat UI for the same agent, sharing its SQLite
+checkpoint file with the CLI — meaning a session started in `python
+main.py --session foo` continues seamlessly in the UI under the same
+session ID, and vice versa.
+
+```bash
+streamlit run streamlit_app.py
+```
+
+The default URL is <http://localhost:8501>.
+
+Sidebar:
+
+- **Existing sessions** dropdown — pick any prior `thread_id` to resume
+  its conversation in full.
+- **Session ID** text input — type a new one to start fresh, or keep an
+  existing one to resume.
+- **User ID** text input — selects which `data/profiles/<user>.md`
+  to load and update.
+- **🆕 New session** button — auto-generates a `session-<timestamp>` ID.
+- **👤 User profile** expander — shows the current user's profile.
+
+Main pane:
+
+- Full message history of the current session, rendered as chat
+  bubbles. Each assistant turn includes a `🧠 reasoning` expander
+  showing the router's classification, each tool call with its args,
+  and each tool result.
+- A `st.chat_input` at the bottom; while a turn is in flight, a live
+  status panel shows the router decision, tool calls, and observations
+  as they arrive from `graph.stream(...)`.
+
 ## Project layout
 
 ```
 .
 ├── main.py                     # agent CLI entry
+├── streamlit_app.py            # Streamlit chat UI (Bonus A)
 ├── mcp_server.py               # FastMCP server entry (Task 3)
 ├── examples/
 │   └── mcp_client_demo.py      # spawns the server, calls two tools
