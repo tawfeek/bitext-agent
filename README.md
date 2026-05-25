@@ -18,7 +18,12 @@ It has two kinds of persistent memory (Task 2):
   `data/profiles/<user>.md` and answered from the agent's prompt
   directly. Pass `--user <id>` to scope the profile.
 
-This README covers **Tasks 1 and 2**.
+And the same six tools are exposed over the Model Context Protocol via a
+FastMCP server (Task 3) so any MCP-compatible client (Claude Desktop,
+the MCP Inspector, a script using `fastmcp.Client`) can call them
+without going through the agent.
+
+This README covers **Tasks 1, 2, and 3**.
 
 ---
 
@@ -256,11 +261,93 @@ answered directly without tool calls.
 Inspect the current profile from inside the REPL with `:profile`, or
 just open the markdown file.
 
+## MCP server (Task 3)
+
+[`mcp_server.py`](mcp_server.py) is a [FastMCP](https://gofastmcp.com)
+server that exposes all six tools used by the agent. It speaks the
+[Model Context Protocol](https://modelcontextprotocol.io) so any
+MCP-compatible client (Claude Desktop, MCP Inspector, a Python script
+using `fastmcp.Client`, …) can call them.
+
+### Start the server
+
+```bash
+# stdio (default — what Claude Desktop / MCP Inspector / our demo use)
+python mcp_server.py
+
+# HTTP (Server-Sent Events) on a TCP port
+python mcp_server.py --transport http --port 8765
+```
+
+The server reuses the same `src/tools.py` implementations as the agent,
+so MCP clients and the agent see identical behavior on the same dataset.
+
+### Connect a client
+
+A working end-to-end demo lives at
+[`examples/mcp_client_demo.py`](examples/mcp_client_demo.py). Run it from
+the repo root:
+
+```bash
+python examples/mcp_client_demo.py
+```
+
+It spawns `mcp_server.py` as a subprocess over stdio, lists the tools,
+and calls two of them. Expected output:
+
+```
+Server exposes 6 tools:
+  - list_categories: ...
+  - list_intents: ...
+  - count_records: ...
+  - get_examples: ...
+  - search_examples: ...
+  - intent_distribution: ...
+
+Calling list_categories()...
+  → ['ACCOUNT', 'CANCEL', 'CONTACT', 'DELIVERY', 'FEEDBACK', ...]
+
+Calling count_records(intent='get_refund')...
+  → { "count": 997, "filters": { "intent": "get_refund" } }
+```
+
+The full client recipe, in a few lines:
+
+```python
+import asyncio
+from fastmcp import Client
+
+async def main():
+    async with Client("mcp_server.py") as client:     # spawns the server
+        print(await client.list_tools())
+        result = await client.call_tool("count_records", {"intent": "get_refund"})
+        print(result.data)
+
+asyncio.run(main())
+```
+
+To wire the server into Claude Desktop, add this to your
+`claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "bitext-data-analyst": {
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": ["/absolute/path/to/mcp_server.py"]
+    }
+  }
+}
+```
+
 ## Project layout
 
 ```
 .
-├── main.py
+├── main.py                     # agent CLI entry
+├── mcp_server.py               # FastMCP server entry (Task 3)
+├── examples/
+│   └── mcp_client_demo.py      # spawns the server, calls two tools
 ├── requirements.txt
 ├── .env.example
 ├── data/                       # all runtime state, gitignored

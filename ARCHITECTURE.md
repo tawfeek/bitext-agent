@@ -411,14 +411,38 @@ agent › I wasn't able to reach a confident answer within 12 reasoning
 
 ---
 
-## 9. What's *not* here (yet)
+## 9. MCP server (Task 3)
 
-These pieces belong to later tasks and are out of scope for this
-document:
+The FastMCP server at [mcp_server.py](mcp_server.py) is the
+*same* analytical surface area as the agent, just over a different
+transport. It calls into the exact `@tool`-decorated functions in
+`src/tools.py` via their `.invoke()` method, so:
 
-- **MCP server (Task 3).** Will wrap the same tool implementations in
-  `src/tools.py` with FastMCP — the tool logic doesn't change, only
-  the transport.
+- adding a tool to the agent also adds it to the MCP server with a
+  one-liner;
+- a behavior change in `src/tools.py` is automatically reflected in
+  both the agent and any MCP client;
+- the LangGraph state machine plays no role for MCP clients — the
+  router, profile, and checkpointer all live on the agent side. MCP
+  exposes the raw analytical primitives.
+
+```mermaid
+flowchart LR
+    subgraph A [Agent process]
+        AG[LangGraph agent] --> LT["src/tools.py @tool"]
+    end
+    subgraph M [MCP server process]
+        MS[mcp_server.py FastMCP] --> LT2["src/tools.py @tool"]
+    end
+    C[External MCP client] --> MS
+```
+
+The server defaults to stdio transport (what Claude Desktop, MCP
+Inspector, and the demo client speak); pass `--transport http
+--port 8765` to expose over HTTP/SSE.
+
+## 10. What's *not* here (yet)
+
 - **Streamlit UI (Bonus A) / query recommender (Bonus B).**
 
 The graph and state are deliberately shaped so each of these is an
